@@ -22,7 +22,6 @@ import net.openhft.chronicle.bytes.BytesUtil;
 import net.openhft.chronicle.bytes.ref.*;
 import net.openhft.chronicle.core.Jvm;
 import net.openhft.chronicle.core.LicenceCheck;
-import net.openhft.chronicle.core.io.IOTools;
 import net.openhft.chronicle.core.io.InvalidMarshallableException;
 import net.openhft.chronicle.core.io.ValidatableUtil;
 import net.openhft.chronicle.core.scoped.ScopedResource;
@@ -34,7 +33,10 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.Serializable;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.net.URL;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Spliterator;
 import java.util.Spliterators;
@@ -465,7 +467,34 @@ public enum WireType implements Function<Bytes<?>, Wire>, LicenceCheck {
             Bytes<?> bytes = stlBytes.get();
             bytes.appendUtf8(cs);
             Wire wire = apply(bytes);
-            return wire.getValueIn().object(tClass);
+
+            T object = wire.getValueIn().object(tClass);
+            cleanNullCollections(object);
+            return object;
+        }
+    }
+
+    private void cleanNullCollections(Object object) {
+        if (object == null) return;
+        Field[] declaredFields = object.getClass().getDeclaredFields();
+
+        for (int i=0; i<declaredFields.length; i++) {
+            Field field = declaredFields[i];
+            if (!Collection.class.isAssignableFrom(field.getType())) continue;
+
+            try {
+                field.setAccessible(true);
+                Object fieldValue = field.get(object);
+
+                if (fieldValue instanceof Collection) {
+                    Collection<?> collection = (Collection<?>) fieldValue;
+                    if (collection.size() == 1 && collection.iterator().next() == null) {
+                        field.set(object, null);
+                    }
+                }
+            } catch (IllegalArgumentException | IllegalAccessException e) {
+                throw new InvalidMarshallableException("Failed cleaning null collection during processing field: " + field.getName());
+            }
         }
     }
 
@@ -588,12 +617,12 @@ public enum WireType implements Function<Bytes<?>, Wire>, LicenceCheck {
      * @throws InvalidMarshallableException If the object cannot be properly serialized.
      */
     public void toFile(@NotNull String filename, WriteMarshallable marshallable) throws IOException, InvalidMarshallableException {
-        String tempFilename = IOTools.tempName(filename);
+        String tempFilename = tempName(filename);
         try (ScopedResource<Bytes<Void>> stlBytes = Wires.acquireBytesScoped()) {
             Bytes<?> bytes = stlBytes.get();
             Wire wire = apply(bytes);
             wire.getValueOut().typedMarshallable(marshallable);
-            IOTools.writeFile(tempFilename, bytes.toByteArray());
+            writeFile(tempFilename, bytes.toByteArray());
         }
         @NotNull File file2 = new File(tempFilename);
         if (!file2.renameTo(new File(filename))) {
